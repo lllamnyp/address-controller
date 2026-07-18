@@ -5,13 +5,17 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
   - local.sdn.cozystack.io
   resources:
   - ipaddressclaims
-  - ipaddresses
   verbs:
-  - create
-  - delete
   - get
   - list
   - patch
@@ -33,3 +37,22 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - local.sdn.cozystack.io
+  resources:
+  - ipaddressclasses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - local.sdn.cozystack.io
+  resources:
+  - ipaddresses
+  verbs:
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
