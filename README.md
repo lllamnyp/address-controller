@@ -1,2 +1,86 @@
 # address-controller
-Core controller for the IPAddressClass feature (local.sdn.cozystack.io) — see cozystack/community#35
+
+The core, class-agnostic controller for IP addresses as a first-class resource
+(design: [cozystack/community#35](https://github.com/cozystack/community/pull/35)).
+It is the analog of the generic PVC/PV binding controller in the storage
+subsystem: it owns claim–address binding, status, and finalizer-driven
+cleanup, and leaves actual address allocation to per-class drivers (the CSI
+analogue), which live in separate projects.
+
+## Resource model
+
+All kinds live in the `local.sdn.cozystack.io/v1alpha1` API group.
+
+| storage | addresses | scope | role |
+|---|---|---|---|
+| `StorageClass` | `IPAddressClass` | cluster | which pool, which driver (`spec.provisioner`), which reclaim policy |
+| `PersistentVolume` | `IPAddress` | cluster | the address itself, with a `claimRef`, a reclaim policy, and a `fromClass`/`providerRef` source union |
+| `PersistentVolumeClaim` | `IPAddressClaim` | namespaced | "give me one" — the whole tenant-facing API |
+
+A tenant creates an `IPAddressClaim`, reads `status.addresses[].address`, and
+puts it in DNS. The claim survives the workload: deleting the Service that
+used the address never releases the address, because the address's lifetime
+belongs to the claim, and (under `reclaimPolicy: Retain`) even outlives the
+claim as a `Released` `IPAddress`.
+
+### Lifecycle
+
+- **Claim**: `Pending` → `Bound` (all requested families bound) → `Lost` (a
+  bound address disappeared). A `Dual` claim binds one IPv4 and one IPv6
+  `IPAddress` and reports both in `status.addresses`.
+- **Address**: `Pending` → `Available` (no `claimRef`) → `Bound` →
+  `Released` (claim deleted under `Retain`; not reusable until an admin
+  clears `spec.claimRef`, at which point it is `Available` again). `Conflict`
+  and `Lost` are driver-owned phases; the core controller treats them as
+  sticky.
+
+## The per-class driver contract
+
+A driver is named by `IPAddressClass.spec.provisioner` and plugs into the
+core controller as follows:
+
+1. **Claim pickup.** The core controller resolves a claim's class (explicit
+   `spec.className`, or the class annotated
+   `ipaddressclass.local.sdn.cozystack.io/is-default-class: "true"`) and
+   stamps the claim with the annotation
+   `local.sdn.cozystack.io/provisioner: <provisioner>`. The driver watches
+   claims carrying its name and provisions for the ones not yet `Bound`.
+2. **Provisioning.** The driver allocates from the class's range
+   (`spec.source.fromClass: {}`) or adopts a provider-side reservation
+   (`spec.source.providerRef.id`), interpreting `IPAddressClass.spec.parameters`
+   (opaque to the core). It creates the `IPAddress` with `spec.claimRef`
+   pre-set to the claim's namespace/name (UID optional — the core completes
+   it), `spec.reclaimPolicy` copied from the class, and **its own finalizer**
+   for backend teardown.
+3. **Binding.** The core controller completes the binding: the claim goes
+   `Bound` with the address in `status.addresses`, the address goes `Bound`.
+   Statically pre-provisioned `Available` addresses (created by an admin or a
+   driver ahead of demand) are matched to claims by class and family; a claim
+   may pin a specific one via `spec.addressName`.
+4. **Reclaim.** When the claim is deleted the core controller either marks
+   the address `Released` (`Retain`) or deletes the `IPAddress` object
+   (`Delete`); in the latter case the driver's finalizer must deallocate the
+   backend resource before allowing the object to go away.
+5. **Association.** Attaching a bound address to a workload is a separate,
+   reversible act and is entirely driver territory: the driver resolves the
+   Service annotation `local.sdn.cozystack.io/ip-address-claim` (naming a
+   claim in the Service's own namespace), writes the backend's pin
+   annotation, and maintains `IPAddress.status.associatedTo`. The driver also
+   reconciles live Service assignments against the ledger and sets the
+   `Conflict` phase when an address is held by a Service its binding does not
+   authorize, and `Lost` when the backing allocation disappears.
+
+The core controller never touches Services, never parses class parameters,
+and never puts a packet on a wire.
+
+## Development
+
+Standard kubebuilder project:
+
+```sh
+make manifests generate   # regenerate CRDs and deepcopy after API changes
+make build                # build the manager
+go test ./internal/controller/
+make install              # install CRDs into the current kube-context
+make run                  # run the controller locally
+```
