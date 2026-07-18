@@ -4,6 +4,11 @@ metadata:
   labels:
     app.kubernetes.io/name: address-controller
     app.kubernetes.io/managed-by: kustomize
-  name: ipaddressclass-sample
+  name: public
+  annotations:
+    ipaddressclass.local.sdn.cozystack.io/is-default-class: "true"
 spec:
-  # TODO(user): Add fields here
+  provisioner: metallb.drivers.local.sdn.cozystack.io
+  reclaimPolicy: Retain
+  parameters:
+    addresses: ["203.0.113.0/24"]

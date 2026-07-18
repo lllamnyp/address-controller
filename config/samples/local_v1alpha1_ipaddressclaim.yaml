@@ -4,6 +4,7 @@ metadata:
   labels:
     app.kubernetes.io/name: address-controller
     app.kubernetes.io/managed-by: kustomize
-  name: ipaddressclaim-sample
+  name: web
 spec:
-  # TODO(user): Add fields here
+  className: public
+  family: IPv4
