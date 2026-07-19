@@ -55,23 +55,45 @@ StorageClass names a CSI driver.
 - `spec.address` (immutable) — the IP, one per object. The object **is**
   the reservation.
 
-  *Why spec and not status:* the IP is the object's identity, not an
-  observation about it. The spec/status rule of thumb is that status must
-  be reconstructible by re-observing the world — but for a `fromClass`
-  address the ledger entry is the *only* record of the allocation; there
-  is no backend anywhere to re-observe the IP from, so it structurally
-  cannot be status. Nor is it ever observed-then-reported by a driver:
-  whoever creates the object — a driver allocating, an admin
-  pre-provisioning or adopting — *chooses* the IP and declares it at
-  creation, which is intent in the ordinary spec sense. This follows the
-  PV precedent (the volume handle lives in `PV.spec` even when a
-  provisioner produced it). And "not all drivers support choosing an
-  address" resolves the other way around: a backend that cannot be told
-  *which* address to use lacks the Pin capability the entire model rests
-  on (an address that can never be re-attached is not a reservation), so
-  such a backend cannot be a driver at all — the proposal is explicit
-  that a class over it must reject claims rather than allocate
-  unattachable addresses.
+  *Why spec and not status:* the split here is request vs. record, not
+  desired vs. observed. The **claim** is the request; an `IPAddress` is
+  created only after an allocation is a fact — the driver performs or
+  observes the backend operation first (carve from a range, allocate at
+  a provider, adopt an existing reservation) and then records the
+  result. The address is therefore always known at creation, and there
+  is no observe-later phase for a status field to serve: an `IPAddress`
+  is never a pending request for an address (that is what a `Pending`
+  claim is), it is the ledger entry for one that exists.
+
+  Given that, the field must provide *identity*, and identity cannot
+  live in status. The object's name derives from the IP, one-object-
+  per-IP is enforced by create-time collision on exactly this value, and
+  conflict detection indexes it — all of which needs the value present
+  from the first moment and immutable for the object's life. Status is
+  the opposite by design: mutable, and legitimately absent at any moment
+  (wiped status must be reconstructible from the world). For the
+  `providerRef` arm the IP genuinely *is* re-observable — describe
+  `eipalloc-…` and read it back — but for the `fromClass` arm the ledger
+  entry is the only record in existence, and a union shares one schema:
+  the arm with nothing to re-observe from decides the placement. The
+  closest precedent is `Service.spec.clusterIP`: allocated by the
+  system, not the user, yet spec — because it is an allocation result
+  the system *commits to* and everything downstream references, not an
+  observation that may drift. (Cluster API's IPAM contract records the
+  address in spec likewise; KEP-1880 goes further and puts it in the
+  object name.)
+
+  Note what this does **not** imply: a provider where the IP cannot be
+  *chosen* at allocation time — AWS hands you whatever `AllocateAddress`
+  returns — is fully supported. Choosing at allocation is not the Pin
+  capability; Pin is attaching a specific *already-reserved* address to
+  a workload at association time, which such providers do natively
+  (associate by the `eipalloc-…` handle). The driver allocates, observes
+  the handle and the IP, and records both (`spec.address`,
+  `spec.source.providerRef`). Only a backend with no pin mechanism at
+  all — nothing that says "use this reserved address" at association
+  time — is disqualified, because a reservation that can never be
+  re-attached is not a reservation.
 - `spec.className` — the class it belongs to.
 - `spec.claimRef` `{namespace, name, uid}` — the binding. `uid` may be
   empty at creation (a driver pre-binding); the core completes it. This
@@ -81,8 +103,10 @@ StorageClass names a CSI driver.
 - `spec.source` — a union, exactly one member set:
   - `fromClass: {}` — the driver carved it from the class's range; the
     driver is the IPAM of record;
-  - `providerRef: {id}` — it wraps a reservation held by an external
-    provider under the provider's own IAM (the adopt case).
+  - `providerRef: {id}` — a reservation held by an external provider
+    under the provider's own IAM, recorded here by its stable handle —
+    whether the driver allocated it at the provider on demand or adopted
+    one that already existed.
 - `status.phase` — see the state machine below.
 - `status.associatedTo` — the workload the address is currently announced
   for. `nil` means *reserved but inert*: held, attached to nothing.
@@ -335,11 +359,14 @@ integration. Its obligations:
    - `spec.claimRef` pre-set to the claim's namespace/name (UID optional —
      the core completes it; setting it is allowed and slightly tighter);
    - `spec.className` set, `spec.reclaimPolicy` copied from the class;
-   - `spec.source` reflecting reality: `fromClass` if the driver
-     allocated, `providerRef` if it adopted an external reservation;
+   - `spec.source` reflecting reality: `fromClass` if the driver carved
+     the address from the class's own range, `providerRef` if a provider
+     holds the reservation (whether the driver allocated it there or
+     adopted a pre-existing one);
    - the driver's **own finalizer**, if teardown has any backend work.
-   The driver decides *which* IP (it is the allocator); the core decides
-   *whether the binding stands* (it is the binder).
+   The driver determines the IP — by choosing it from a range, or by
+   recording what its backend handed out; the core decides *whether the
+   binding stands* (it is the binder).
 3. **Never touch core-owned state** (§3): claim status, the core phases,
    core finalizers, or the `claimRef` of any existing address.
 4. **Tear down on deletion.** When an `IPAddress` the driver created is
