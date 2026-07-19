@@ -158,7 +158,10 @@ func (r *IPAddressClaimReconciler) resolveClass(ctx context.Context, claim *loca
 		return "", err
 	}
 
-	if claim.Annotations[localv1alpha1.ProvisionerAnnotation] == "" {
+	// The stamp always mirrors the resolved class's provisioner; if the
+	// claim is re-targeted at a different class before binding, drivers
+	// must see the new name.
+	if claim.Annotations[localv1alpha1.ProvisionerAnnotation] != class.Spec.Provisioner {
 		if claim.Annotations == nil {
 			claim.Annotations = map[string]string{}
 		}

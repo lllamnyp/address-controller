@@ -7,6 +7,11 @@ subsystem: it owns claim–address binding, status, and finalizer-driven
 cleanup, and leaves actual address allocation to per-class drivers (the CSI
 analogue), which live in separate projects.
 
+**The full contract — state machines, reconciliation algorithms, field
+ownership, and driver obligations — is specified in
+[docs/design.md](docs/design.md).** The reference driver implementing it is
+[metallb-iad](https://github.com/lllamnyp/metallb-iad).
+
 ## Resource model
 
 All kinds live in the `local.sdn.cozystack.io/v1alpha1` API group.
