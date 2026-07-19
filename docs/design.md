@@ -42,7 +42,9 @@ StorageClass names a CSI driver.
 - `spec.provisioner` (immutable) — the driver that fulfils claims of this
   class.
 - `spec.reclaimPolicy` — `Retain` (default) or `Delete`; copied onto each
-  provisioned `IPAddress`, where it takes effect.
+  provisioned `IPAddress`, where it takes effect. What each policy
+  actually reclaims — the API object, the ledger entry, backend state —
+  is spelled out in §6.
 - `spec.parameters` — an opaque object (unknown fields preserved), never
   read by the core. Shape is defined by the driver.
 - The annotation `ipaddressclass.local.sdn.cozystack.io/is-default-class:
@@ -52,6 +54,24 @@ StorageClass names a CSI driver.
 
 - `spec.address` (immutable) — the IP, one per object. The object **is**
   the reservation.
+
+  *Why spec and not status:* the IP is the object's identity, not an
+  observation about it. The spec/status rule of thumb is that status must
+  be reconstructible by re-observing the world — but for a `fromClass`
+  address the ledger entry is the *only* record of the allocation; there
+  is no backend anywhere to re-observe the IP from, so it structurally
+  cannot be status. Nor is it ever observed-then-reported by a driver:
+  whoever creates the object — a driver allocating, an admin
+  pre-provisioning or adopting — *chooses* the IP and declares it at
+  creation, which is intent in the ordinary spec sense. This follows the
+  PV precedent (the volume handle lives in `PV.spec` even when a
+  provisioner produced it). And "not all drivers support choosing an
+  address" resolves the other way around: a backend that cannot be told
+  *which* address to use lacks the Pin capability the entire model rests
+  on (an address that can never be re-attached is not a reservation), so
+  such a backend cannot be a driver at all — the proposal is explicit
+  that a class over it must reject claims rather than allocate
+  unattachable addresses.
 - `spec.className` — the class it belongs to.
 - `spec.claimRef` `{namespace, name, uid}` — the binding. `uid` may be
   empty at creation (a driver pre-binding); the core completes it. This
@@ -77,7 +97,7 @@ StorageClass names a CSI driver.
   claims.
 - `status.phase` — `Pending` | `Bound` | `Lost`.
 - `status.className` — the sticky record of which class the claim resolved
-  to (see §4 step 3).
+  to (see §4 step 6).
 - `status.addresses` — a list of `{name, address}`, one entry per bound
   `IPAddress`, so a `Dual` claim reports both families. This is what a
   tenant reads and puts in DNS.
@@ -136,7 +156,24 @@ idempotent; the pass re-derives everything from the cluster state.
 2. **Protection.** Ensure the claim carries the
    `local.sdn.cozystack.io/claim-protection` finalizer, so deletion always
    passes through the reclaim flow.
-3. **Class resolution.** Resolve a class name, trying in order:
+3. **Collect bound addresses.** All `IPAddress` objects whose `claimRef`
+   names this claim's namespace/name, and whose `claimRef.uid` is either
+   empty or equal to the claim's UID. A UID *mismatch* means the address
+   is bound to an earlier, deleted claim that happened to have the same
+   name — a stale binding. It is never adopted; the address reconciler
+   reclaims it (§5 step 6).
+4. **Complete pre-bindings.** For collected addresses with an empty
+   `claimRef.uid` (a driver pre-bound them at creation), write the claim's
+   UID. This is the core's acceptance of the driver's provisioning.
+5. **Anything missing?** Expand `spec.family` into concrete families
+   (`Dual` → v4 + v6); a family is satisfied if some collected address of
+   that family exists and is not in phase `Lost`. **If every family is
+   satisfied, skip straight to status (step 8) — the class is not
+   consulted at all.** Binding state comes strictly before class state:
+   a fully bound claim needs nothing from its class, so a deleted class
+   never disturbs existing bindings (see *Class deletion* below).
+6. **Class resolution** (only reached with families missing). Resolve a
+   class name, trying in order:
    1. `spec.className`, if set (an explicit spec always wins);
    2. `status.className` — the sticky record of a previous resolution, so
       a claim that resolved against a default class does not flap when the
@@ -144,30 +181,19 @@ idempotent; the pass re-derives everything from the cluster state.
    3. the *default class*: the exactly-one `IPAddressClass` annotated as
       default. Zero or more than one is a terminal condition for this pass
       (`NoDefaultClass` / `MultipleDefaultClasses` on the `ClassResolved`
-      condition, phase `Pending`); the claim is retried when any class
-      changes. The core deliberately refuses to guess among multiple
-      defaults.
+      condition); the claim is retried when any class changes. The core
+      deliberately refuses to guess among multiple defaults.
 
-   The named class must exist (`ClassNotFound` condition otherwise). On
-   success the core **stamps** the claim with the annotation
-   `local.sdn.cozystack.io/provisioner: <class.spec.provisioner>`. The
-   stamp always mirrors the resolved class — if a claim is re-targeted at
-   a different class before binding, the stamp follows. This annotation is
-   the driver's watch key; it is how a driver knows a claim is its to
-   serve without ever resolving classes itself.
-4. **Collect bound addresses.** All `IPAddress` objects whose `claimRef`
-   names this claim's namespace/name, and whose `claimRef.uid` is either
-   empty or equal to the claim's UID. A UID *mismatch* means the address
-   is bound to an earlier, deleted claim that happened to have the same
-   name — a stale binding. It is never adopted; the address reconciler
-   reclaims it (§5 step 6).
-5. **Complete pre-bindings.** For collected addresses with an empty
-   `claimRef.uid` (a driver pre-bound them at creation), write the claim's
-   UID. This is the core's acceptance of the driver's provisioning.
-6. **Match, per missing family.** Expand `spec.family` into concrete
-   families (`Dual` → v4 + v6). A family is satisfied if some collected
-   address of that family exists and is not in phase `Lost`. For each
-   unsatisfied family:
+   The named class must exist (`ClassNotFound` condition otherwise; the
+   pass still falls through to step 8 so phase and addresses stay
+   maintained). On success the core **stamps** the claim with the
+   annotation `local.sdn.cozystack.io/provisioner:
+   <class.spec.provisioner>`. The stamp always mirrors the resolved
+   class — if a claim is re-targeted at a different class before binding,
+   the stamp follows. This annotation is the driver's watch key; it is
+   how a driver knows a claim is its to serve without ever resolving
+   classes itself.
+7. **Match, per missing family.** For each unsatisfied family:
    - candidate set: if `spec.addressName` is set, only that object;
      otherwise every address in phase `Available` (so: no `claimRef`, and
      already accepted by the address reconciler) with the resolved class
@@ -179,7 +205,7 @@ idempotent; the pass re-derives everything from the cluster state.
      candidate);
    - no candidate → the family stays unsatisfied and the claim waits for
      its driver to provision.
-7. **Status.** Recompute from scratch:
+8. **Status.** Recompute from scratch:
    - all families satisfied → `Bound`;
    - previously `Bound` (or `Lost`) and now unsatisfied → `Lost` — a
      binding degraded, which is surfaced, never silently re-provisioned
@@ -188,7 +214,19 @@ idempotent; the pass re-derives everything from the cluster state.
    - otherwise `Pending`, with the `Bound` condition explaining what it
      waits for (`WaitingForProvisioning` names the stamped provisioner).
    `status.addresses` lists every collected address (name + IP), sorted
-   by object name. `status.className` records the resolution.
+   by object name. `status.className` records the resolution when one
+   happened this pass and is left untouched otherwise.
+
+**Class deletion.** The class is load-bearing only at two moments:
+resolving/stamping an unbound claim, and matching or provisioning *new*
+bindings. Everything downstream deliberately avoids depending on it:
+satisfied claims skip class resolution entirely (step 5), reclaim reads
+the `reclaimPolicy` **copied onto each address** at provisioning time
+(§6), and the address reconciler never reads classes at all. So deleting
+an `IPAddressClass` — or restarting the controller after its deletion —
+leaves every existing binding, every reclaim, and all status upkeep
+intact; the only effect is that still-unbound claims of that class stop
+progressing, honestly reported as `Pending` with `ClassNotFound`.
 
 ## 5. The address reconciliation algorithm
 
@@ -245,7 +283,7 @@ Runs behind the claim's protection finalizer, so it always runs before
 the claim disappears:
 
 - For every address bound to the claim (same collection rule as §4 step
-  4), apply **the address's** `reclaimPolicy` — copied from the class at
+  3), apply **the address's** `reclaimPolicy` — copied from the class at
   provisioning time, so a later class edit does not retroactively change
   the fate of existing addresses:
   - `Retain` → phase `Released`. The `claimRef` **survives** — the
@@ -254,6 +292,33 @@ the claim disappears:
     any backend state; the driver's own finalizer on the address
     intercepts the deletion and deallocates first (§7 obligation 4).
 - Remove the finalizer; the claim goes away.
+
+**What each policy actually reclaims.** "The address" is up to three
+things: the API object, the reservation it records, and whatever backend
+state stands behind it. The policies act on them differently:
+
+- `Retain` acts on nothing but the phase. The object stays, so the
+  reservation stays: a range-carved (`fromClass`) IP remains excluded from
+  allocation, and a provider-held (`providerRef`) reservation remains held
+  at the provider — **which means it keeps incurring provider charges**.
+  That is deliberate, not a leak: retained means still yours, and an
+  idle-but-billed address is exactly what holding an elastic IP is. The
+  cost stops only when the reservation is actually given up, i.e. when
+  someone deletes the `IPAddress` object.
+- `Delete` removes the object, and the driver's teardown finalizer is
+  where backend state is released before it goes: a `fromClass` address
+  returns to the free range simply by its ledger entry ceasing to exist
+  (for backends like MetalLB there is nothing else to do); a
+  provider-side reservation **the driver itself created** must be
+  released at the provider. For a reservation the driver merely *adopted*
+  (it existed before the object, e.g. an admin-imported EIP), whether
+  teardown releases it or leaves it in the provider's hands is the
+  driver's documented policy call — the safe default is to leave what
+  you did not create.
+
+So the EIP question has a precise answer: `Retain` keeps the EIP and its
+bill until an admin deletes the object; `Delete` releases a
+driver-allocated EIP at the provider, via the driver's finalizer.
 
 ## 7. The driver contract
 
@@ -296,7 +361,7 @@ integration. Its obligations:
    phase back to a core-owned value once the condition has passed.
 
 Static pre-provisioning needs no driver at all: an admin may create
-`Available` addresses by hand and the core matches them (§4 step 6).
+`Available` addresses by hand and the core matches them (§4 step 7).
 
 ## 8. Interaction walkthrough (the happy path)
 

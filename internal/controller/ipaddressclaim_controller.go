@@ -75,14 +75,34 @@ func (r *IPAddressClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 	}
 
-	className, err := r.resolveClass(ctx, claim)
-	if err != nil || className == "" {
+	// Binding state comes first, and the class is consulted only when
+	// something is still missing: a fully bound claim must keep working —
+	// and keep its status maintained — even if its class was deleted.
+	bound, err := r.addressesBoundTo(ctx, claim)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.completePreBindings(ctx, claim, bound); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	bound, err := r.reconcileBinding(ctx, claim, className)
-	if err != nil {
-		return ctrl.Result{}, err
+	className := ""
+	if len(missingFamilies(claim, bound)) > 0 {
+		className, err = r.resolveClass(ctx, claim)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if className != "" {
+			for _, family := range missingFamilies(claim, bound) {
+				matched, err := r.bindAvailableAddress(ctx, claim, className, family)
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+				if matched != nil {
+					bound = append(bound, *matched)
+				}
+			}
+		}
 	}
 
 	if err := r.updateClaimStatus(ctx, claim, className, bound); err != nil {
@@ -135,7 +155,8 @@ func (r *IPAddressClaimReconciler) finalizeClaim(ctx context.Context, claim *loc
 // resolveClass resolves the claim's class name — spec first, then the sticky
 // status record, then the default class — verifies the class exists, and
 // stamps the provisioner annotation. An empty return with nil error means the
-// claim cannot resolve yet; the reason is already recorded in status.
+// claim cannot resolve yet; the reason is already recorded on the in-memory
+// conditions, persisted by the caller's status update.
 func (r *IPAddressClaimReconciler) resolveClass(ctx context.Context, claim *localv1alpha1.IPAddressClaim) (string, error) {
 	className := claim.Spec.ClassName
 	if className == "" {
@@ -152,8 +173,9 @@ func (r *IPAddressClaimReconciler) resolveClass(ctx context.Context, claim *loca
 	class := &localv1alpha1.IPAddressClass{}
 	if err := r.Get(ctx, types.NamespacedName{Name: className}, class); err != nil {
 		if apierrors.IsNotFound(err) {
-			return "", r.markUnresolved(ctx, claim, localv1alpha1.ReasonClassNotFound,
+			r.markUnresolved(claim, localv1alpha1.ReasonClassNotFound,
 				fmt.Sprintf("IPAddressClass %q not found", className))
+			return "", nil
 		}
 		return "", err
 	}
@@ -190,16 +212,20 @@ func (r *IPAddressClaimReconciler) defaultClassName(ctx context.Context, claim *
 	case 1:
 		return defaults[0], nil
 	case 0:
-		return "", r.markUnresolved(ctx, claim, localv1alpha1.ReasonNoDefaultClass,
+		r.markUnresolved(claim, localv1alpha1.ReasonNoDefaultClass,
 			"claim names no class and no IPAddressClass is annotated as default")
+		return "", nil
 	default:
 		sort.Strings(defaults)
-		return "", r.markUnresolved(ctx, claim, localv1alpha1.ReasonMultipleDefaultClasses,
+		r.markUnresolved(claim, localv1alpha1.ReasonMultipleDefaultClasses,
 			fmt.Sprintf("multiple IPAddressClasses annotated as default: %v", defaults))
+		return "", nil
 	}
 }
 
-func (r *IPAddressClaimReconciler) markUnresolved(ctx context.Context, claim *localv1alpha1.IPAddressClaim, reason, message string) error {
+// markUnresolved records a failed class resolution on the in-memory object;
+// the caller's status update persists it.
+func (r *IPAddressClaimReconciler) markUnresolved(claim *localv1alpha1.IPAddressClaim, reason, message string) {
 	r.Recorder.Event(claim, "Warning", reason, message)
 	meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
 		Type:               localv1alpha1.ConditionClassResolved,
@@ -208,41 +234,21 @@ func (r *IPAddressClaimReconciler) markUnresolved(ctx context.Context, claim *lo
 		Message:            message,
 		ObservedGeneration: claim.Generation,
 	})
-	if claim.Status.Phase == "" {
-		claim.Status.Phase = localv1alpha1.ClaimPending
-	}
-	return r.Status().Update(ctx, claim)
 }
 
-// reconcileBinding accepts driver pre-bound addresses (completing their
-// claimRef UID) and matches Available addresses to still-unsatisfied
-// families. It returns the set of addresses bound to the claim.
-func (r *IPAddressClaimReconciler) reconcileBinding(ctx context.Context, claim *localv1alpha1.IPAddressClaim, className string) ([]localv1alpha1.IPAddress, error) {
-	addrs, err := r.addressesBoundTo(ctx, claim)
-	if err != nil {
-		return nil, err
-	}
-	// Complete driver pre-bindings that carry no UID yet.
+// completePreBindings accepts driver pre-bound addresses by writing the
+// claim's UID into claimRefs that carry none yet.
+func (r *IPAddressClaimReconciler) completePreBindings(ctx context.Context, claim *localv1alpha1.IPAddressClaim, addrs []localv1alpha1.IPAddress) error {
 	for i := range addrs {
 		addr := &addrs[i]
 		if addr.Spec.ClaimRef.UID == "" {
 			addr.Spec.ClaimRef.UID = claim.UID
 			if err := r.Update(ctx, addr); err != nil {
-				return nil, err
+				return err
 			}
 		}
 	}
-
-	for _, family := range missingFamilies(claim, addrs) {
-		bound, err := r.bindAvailableAddress(ctx, claim, className, family)
-		if err != nil {
-			return nil, err
-		}
-		if bound != nil {
-			addrs = append(addrs, *bound)
-		}
-	}
-	return addrs, nil
+	return nil
 }
 
 // addressesBoundTo lists live addresses whose claimRef names this claim and
@@ -358,6 +364,9 @@ func (r *IPAddressClaimReconciler) bindAvailableAddress(ctx context.Context, cla
 }
 
 // updateClaimStatus recomputes phase, bound-address list, and conditions.
+// An empty className means resolution was not needed (nothing missing) or
+// not possible this pass (conditions already say why); the sticky
+// status.className is left untouched then.
 func (r *IPAddressClaimReconciler) updateClaimStatus(ctx context.Context, claim *localv1alpha1.IPAddressClaim, className string, bound []localv1alpha1.IPAddress) error {
 	previous := claim.Status.Phase
 
@@ -367,15 +376,17 @@ func (r *IPAddressClaimReconciler) updateClaimStatus(ctx context.Context, claim 
 		reported = append(reported, localv1alpha1.BoundAddress{Name: addr.Name, Address: addr.Spec.Address})
 	}
 
-	claim.Status.ClassName = className
 	claim.Status.Addresses = reported
-	meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
-		Type:               localv1alpha1.ConditionClassResolved,
-		Status:             metav1.ConditionTrue,
-		Reason:             localv1alpha1.ReasonResolved,
-		Message:            fmt.Sprintf("resolved to IPAddressClass %q", className),
-		ObservedGeneration: claim.Generation,
-	})
+	if className != "" {
+		claim.Status.ClassName = className
+		meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
+			Type:               localv1alpha1.ConditionClassResolved,
+			Status:             metav1.ConditionTrue,
+			Reason:             localv1alpha1.ReasonResolved,
+			Message:            fmt.Sprintf("resolved to IPAddressClass %q", className),
+			ObservedGeneration: claim.Generation,
+		})
+	}
 
 	missing := missingFamilies(claim, bound)
 	switch {
@@ -399,12 +410,15 @@ func (r *IPAddressClaimReconciler) updateClaimStatus(ctx context.Context, claim 
 		})
 	default:
 		claim.Status.Phase = localv1alpha1.ClaimPending
+		message := fmt.Sprintf("waiting for class resolution before families %v can be provisioned", missing)
+		if provisioner := claim.Annotations[localv1alpha1.ProvisionerAnnotation]; provisioner != "" {
+			message = fmt.Sprintf("waiting for provisioner %q to provision families %v", provisioner, missing)
+		}
 		meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
-			Type:   localv1alpha1.ConditionBound,
-			Status: metav1.ConditionFalse,
-			Reason: localv1alpha1.ReasonWaitingForProvisioning,
-			Message: fmt.Sprintf("waiting for provisioner %q to provision families %v",
-				claim.Annotations[localv1alpha1.ProvisionerAnnotation], missing),
+			Type:               localv1alpha1.ConditionBound,
+			Status:             metav1.ConditionFalse,
+			Reason:             localv1alpha1.ReasonWaitingForProvisioning,
+			Message:            message,
 			ObservedGeneration: claim.Generation,
 		})
 	}

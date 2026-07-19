@@ -362,6 +362,58 @@ func TestClaimDeletionDeletePolicyDeletesAddress(t *testing.T) {
 	}
 }
 
+func TestBoundClaimSurvivesClassDeletion(t *testing.T) {
+	// A fully bound claim must reconcile without touching its class:
+	// deleting the class breaks neither the binding nor status upkeep.
+	claim := pendingClaim("public")
+	claim.Finalizers = []string{localv1alpha1.ClaimProtectionFinalizer}
+	claim.Annotations = map[string]string{localv1alpha1.ProvisionerAnnotation: "metallb.drivers.local.sdn.cozystack.io"}
+	claim.Status = localv1alpha1.IPAddressClaimStatus{
+		Phase:     localv1alpha1.ClaimBound,
+		ClassName: "public",
+	}
+	addr := &localv1alpha1.IPAddress{
+		ObjectMeta: metav1.ObjectMeta{Name: "ip-203-0-113-14"},
+		Spec: localv1alpha1.IPAddressSpec{
+			ClassName: "public",
+			Address:   "203.0.113.14",
+			ClaimRef:  &localv1alpha1.ClaimReference{Namespace: "tenant-a", Name: "web", UID: "claim-uid-1"},
+			Source:    localv1alpha1.IPAddressSource{FromClass: &localv1alpha1.FromClassSource{}},
+		},
+		Status: localv1alpha1.IPAddressStatus{Phase: localv1alpha1.IPAddressBound},
+	}
+	// Note: no IPAddressClass object at all.
+	c := testClient(t, claim, addr)
+	reconcileClaim(t, claimReconciler(c), "tenant-a", "web")
+
+	got := getClaim(t, c, "tenant-a", "web")
+	if got.Status.Phase != localv1alpha1.ClaimBound {
+		t.Errorf("phase = %q, want Bound to survive class deletion", got.Status.Phase)
+	}
+	if got.Status.ClassName != "public" {
+		t.Errorf("status.className = %q, want the sticky record untouched", got.Status.ClassName)
+	}
+	if len(got.Status.Addresses) != 1 || got.Status.Addresses[0].Address != "203.0.113.14" {
+		t.Errorf("status.addresses = %+v, want status upkeep to continue", got.Status.Addresses)
+	}
+}
+
+func TestPendingClaimWithMissingClassRecordsClassNotFound(t *testing.T) {
+	// An unbound claim naming a class that does not exist stays Pending
+	// with the reason recorded; only provisioning is blocked.
+	c := testClient(t, pendingClaim("nonexistent"))
+	reconcileClaim(t, claimReconciler(c), "tenant-a", "web")
+
+	claim := getClaim(t, c, "tenant-a", "web")
+	if claim.Status.Phase != localv1alpha1.ClaimPending {
+		t.Errorf("phase = %q, want Pending", claim.Status.Phase)
+	}
+	cond := meta.FindStatusCondition(claim.Status.Conditions, localv1alpha1.ConditionClassResolved)
+	if cond == nil || cond.Reason != localv1alpha1.ReasonClassNotFound {
+		t.Errorf("ClassResolved condition = %+v, want reason ClassNotFound", cond)
+	}
+}
+
 func TestBoundClaimGoesLostWhenAddressDisappears(t *testing.T) {
 	claim := pendingClaim("public")
 	claim.Finalizers = []string{localv1alpha1.ClaimProtectionFinalizer}
