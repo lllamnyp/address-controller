@@ -1,0 +1,14 @@
+apiVersion: local.sdn.cozystack.io/v1alpha1
+kind: IPAddressClass
+metadata:
+  labels:
+    app.kubernetes.io/name: address-controller
+    app.kubernetes.io/managed-by: kustomize
+  name: public
+  annotations:
+    ipaddressclass.local.sdn.cozystack.io/is-default-class: "true"
+spec:
+  provisioner: metallb.drivers.local.sdn.cozystack.io
+  reclaimPolicy: Retain
+  parameters:
+    addresses: ["203.0.113.0/24"]

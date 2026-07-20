@@ -1,0 +1,16 @@
+apiVersion: local.sdn.cozystack.io/v1alpha1
+kind: IPAddress
+metadata:
+  labels:
+    app.kubernetes.io/name: address-controller
+    app.kubernetes.io/managed-by: kustomize
+  name: ip-203-0-113-7
+spec:
+  className: public
+  address: 203.0.113.7
+  reclaimPolicy: Retain
+  claimRef:
+    namespace: default
+    name: web
+  source:
+    fromClass: {}

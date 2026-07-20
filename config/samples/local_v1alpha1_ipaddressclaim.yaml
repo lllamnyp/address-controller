@@ -1,0 +1,10 @@
+apiVersion: local.sdn.cozystack.io/v1alpha1
+kind: IPAddressClaim
+metadata:
+  labels:
+    app.kubernetes.io/name: address-controller
+    app.kubernetes.io/managed-by: kustomize
+  name: web
+spec:
+  className: public
+  family: IPv4

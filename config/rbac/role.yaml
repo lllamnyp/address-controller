@@ -1,0 +1,58 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - local.sdn.cozystack.io
+  resources:
+  - ipaddressclaims
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - local.sdn.cozystack.io
+  resources:
+  - ipaddressclaims/finalizers
+  - ipaddresses/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - local.sdn.cozystack.io
+  resources:
+  - ipaddressclaims/status
+  - ipaddresses/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - local.sdn.cozystack.io
+  resources:
+  - ipaddressclasses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - local.sdn.cozystack.io
+  resources:
+  - ipaddresses
+  verbs:
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
