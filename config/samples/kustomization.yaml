@@ -1,6 +1,0 @@
-## Append samples of your project ##
-resources:
-- local_v1alpha1_ipaddressclass.yaml
-- local_v1alpha1_ipaddress.yaml
-- local_v1alpha1_ipaddressclaim.yaml
-# +kubebuilder:scaffold:manifestskustomizesamples

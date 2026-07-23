@@ -30,6 +30,9 @@ spec:
     - jsonPath: .spec.claimRef.name
       name: Claim
       type: string
+    - jsonPath: .status.associatedTo.name
+      name: AttachedTo
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date

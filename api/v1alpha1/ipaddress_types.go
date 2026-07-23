@@ -164,6 +164,7 @@ type IPAddressStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="ClaimNamespace",type=string,JSONPath=`.spec.claimRef.namespace`
 // +kubebuilder:printcolumn:name="Claim",type=string,JSONPath=`.spec.claimRef.name`
+// +kubebuilder:printcolumn:name="AttachedTo",type=string,JSONPath=`.status.associatedTo.name`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // IPAddress is a concrete address the cluster owns — the inventory object,
